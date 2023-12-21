@@ -142,6 +142,7 @@ def extract_dataflow(code, parser, lang):
             DFG = []
         DFG = sorted(DFG, key=lambda x: x[1])
         # identify critical node in DFG
+        # 这里就是计算CDFG
         critical_idx = []
         for id, e in enumerate(DFG):
             if e[0] == "call" and DFG[id+1][0] == "value":
@@ -243,39 +244,46 @@ def convert_examples_to_features(item):
                                       3-min(len(dfg), args.data_flow_length)][:512-3]
             source_tokens = [tokenizer.cls_token] + \
                 code_tokens+[tokenizer.sep_token]
+            # 
             source_ids = tokenizer.convert_tokens_to_ids(source_tokens)
             position_idx = [i+tokenizer.pad_token_id +
                             1 for i in range(len(source_tokens))]
             dfg = dfg[:args.code_length +
                       args.data_flow_length-len(source_tokens)]
-            source_tokens += [x[0] for x in dfg]
-            position_idx += [0 for x in dfg]
+            # 这里好像是把dfg截断了，长度为总长-源码长度，如果dfg是空，那么下面就要padding
+            source_tokens += [x[0] for x in dfg] # 把变量序列拼接在source_tokens后面
+            position_idx += [0 for x in dfg]    # position_idx的长度也要对齐
             source_ids += [tokenizer.unk_token_id for x in dfg]
+            # 这里把dfg的长度也拼接进去，如果dfg是空，那么padding_length就不会为0，就需要padding
             padding_length = args.code_length + \
                 args.data_flow_length-len(source_ids)
             position_idx += [tokenizer.pad_token_id]*padding_length
             source_ids += [tokenizer.pad_token_id]*padding_length
 
-            # reindex
+            # reindex，这里其实就是把变量的来源设置成了离他最近的那个变量
             reverse_index = {}
             for idx, x in enumerate(dfg):
                 reverse_index[x[1]] = idx
             for idx, x in enumerate(dfg):
                 dfg[idx] = x[:-1]+([reverse_index[i]
                                     for i in x[-1] if i in reverse_index],)
+            # 表示的就是dfg中的一条边，从几号变量到几号变量
             dfg_to_dfg = [x[-1] for x in dfg]
-            dfg_to_code = [ori2cur_pos[x[1]] for x in dfg]
+            dfg_to_code = [ori2cur_pos[x[1]] for x in dfg] # 一个元素是“3:(260,264)”，表示3号变量来源于(260,264)所表示的token
             length = len([tokenizer.cls_token])
             dfg_to_code = [(x[0]+length, x[1]+length) for x in dfg_to_code]
             cache[url] = source_tokens, source_ids, position_idx, dfg_to_code, dfg_to_dfg
 
     source_tokens_1, source_ids_1, position_idx_1, dfg_to_code_1, dfg_to_dfg_1 = cache[url1]
+    # input_id就是token被映射后的唯一id
+    #                    input_tokens_1,  input_ids_1,  position_idx_1, dfg_to_code_1, dfg_to_dfg_1
     return InputFeatures(source_tokens_1, source_ids_1, position_idx_1, dfg_to_code_1, dfg_to_dfg_1,
 
                          label, url1)
 
 
 class TextDataset(Dataset):
+    # 根据txt文件中的索引组建数据集
     def __init__(self, tokenizer, args, file_path='train'):
         self.examples = []
         self.args = args
@@ -318,17 +326,26 @@ class TextDataset(Dataset):
         return len(self.examples)
 
     def __getitem__(self, item):
+        #所谓的数据流信息就是在这里使用的
+        #根据数据流信息创建对应的attn_mask，使模型对每个token赋予强弱不同的注意力，这便是所谓的注意力机制
         # calculate graph-guided masked function
+        '''
+        这行代码创建了一个名为 `attn_mask_1` 的二维布尔数组，其形状由 `self.args.code_length+self.args.data_flow_length` 决定。这个数组的所有元素都被初始化为 `False`（在 numpy 中，`0` 对应 `False`，`1` 对应 `True`）。这个 `attn_mask_1` 可能被用作注意力掩码（attention mask）¹²。在深度学习模型（特别是 Transformer 模型）中，注意力掩码用于阻止模型关注到某些位置¹²。例如，在处理序列数据时，我们可能希望模型忽略序列的某些部分（如填充的部分）。在这种情况下，我们可以创建一个掩码，将我们希望模型忽略的位置设置为 `True`（或者在这个例子中，由于使用了 `np.zeros`，所以初始时所有位置都被设置为 `False`，表示模型可以关注所有位置）。
+        '''
         attn_mask_1 = np.zeros((self.args.code_length+self.args.data_flow_length,
-                                self.args.code_length+self.args.data_flow_length), dtype=np.bool)
+                                self.args.code_length+self.args.data_flow_length), dtype=bool)
         # calculate begin index of node and max length of input
-        node_index = sum([i > 1 for i in self.examples[item].position_idx_1])
-        max_length = sum([i != 1 for i in self.examples[item].position_idx_1])
+        # position_idx_1是什么？token在序列中的序号
+        # position_idx_1为1是tokenizer.pad_token_id，表明dfg是空，总序列是经过了padding的
+        # position_idx_1为0是tokenizer.unk_token_id，表明dfg不为空
+        node_index = sum([i > 1 for i in self.examples[item].position_idx_1]) #源代码的长度
+        max_length = sum([i != 1 for i in self.examples[item].position_idx_1]) #padding之前的长度：源代码+dfg的长度
         # sequence can attend to sequence
+        # 模型不能关注前node_index行列方阵的信息
         attn_mask_1[:node_index, :node_index] = True
         # special tokens attend to all tokens
         for idx, i in enumerate(self.examples[item].input_ids_1):
-            if i in [0, 2]:
+            if i in [0, 2]: #其实就是CLS和SEP
                 attn_mask_1[idx, :max_length] = True
         # nodes attend to code tokens that are identified from
         for idx, (a, b) in enumerate(self.examples[item].dfg_to_code_1):
@@ -390,7 +407,7 @@ def train(args, train_dataset, model, tokenizer):
     logger.info("  Num examples = %d", len(train_dataset))
     logger.info("  Num Epochs = %d", args.epochs)
     logger.info("  Instantaneous batch size per GPU = %d",
-                args.train_batch_size//args.n_gpu)
+                args.train_batch_size if args.n_gpu==0 else args.train_batch_size//args.n_gpu)
     logger.info("  Total train batch size = %d",
                 args.train_batch_size*args.gradient_accumulation_steps)
     logger.info("  Gradient Accumulation steps = %d",
@@ -410,7 +427,10 @@ def train(args, train_dataset, model, tokenizer):
         for step, batch in enumerate(bar):
             (inputs_ids_1, position_idx_1, attn_mask_1,
              labels) = [x.to(args.device) for x in batch]
+            # 设置模型为训练模式
             model.train()
+            # 进行训练
+            # __call__方法允许将一个实例像一个函数一样进行调用，当然Model中的__call__方法中调用forwar方法，所以可以开始训练
             loss, logits = model(
                 inputs_ids_1, position_idx_1, attn_mask_1, labels)
 

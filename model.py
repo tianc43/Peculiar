@@ -37,15 +37,16 @@ class Model(nn.Module):
         
     def forward(self, inputs_ids,position_idx,attn_mask,labels=None): 
         bs,l=inputs_ids.size()
-      
         inputs_ids=(inputs_ids.unsqueeze(1)).view(bs*1,l)
         position_idx=(position_idx.unsqueeze(1)).view(bs*1,l)  
+        # 这种操作在处理多头注意力机制时常见，用于调整注意力掩码的形状以匹配输入数据的形状
         attn_mask=(attn_mask.unsqueeze(1)).view(bs*1,l,l)
         #embedding
-        nodes_mask=position_idx.eq(0)
-        token_mask=position_idx.ge(2) 
+        nodes_mask=position_idx.eq(0) # 等于0的是unk_token_id，表示的是数据流中的节点 
+        token_mask=position_idx.ge(2) # 大于等于2的是源代码token
         inputs_embeddings=self.encoder.roberta.embeddings.word_embeddings(inputs_ids)
         nodes_to_token_mask=nodes_mask[:,:,None]&token_mask[:,None,:]&attn_mask
+        # 这是一种常见的归一化技术，用于将值转换为概率分布。1e-10 是一个很小的数，用于防止除以零的错误。
         nodes_to_token_mask=nodes_to_token_mask/(nodes_to_token_mask.sum(-1)+1e-10)[:,:,None]
         avg_embeddings=torch.einsum("abc,acd->abd",nodes_to_token_mask,inputs_embeddings)
         inputs_embeddings=inputs_embeddings*(~nodes_mask)[:,:,None]+avg_embeddings*nodes_mask[:,:,None]    

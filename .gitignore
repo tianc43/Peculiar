@@ -1,0 +1,7 @@
+**/my-languages.so
+.vscode/
+**/__pycache__
+saved_models/checkpoint-best-f1
+dataset/
+*.log
+*.so

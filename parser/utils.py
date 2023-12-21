@@ -59,7 +59,7 @@ def remove_comments_and_docstrings(source,lang):
             if x.strip()!="":
                 temp.append(x)
         return '\n'.join(temp)
-
+# 记录的是token的位置 第几行第几列~第几行第几列((0,0),(0,6))
 def tree_to_token_index(root_node):
     if (len(root_node.children)==0 or root_node.type=='string') and root_node.type!='comment':
         return [(root_node.start_point,root_node.end_point)]
